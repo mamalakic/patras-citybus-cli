@@ -12,6 +12,8 @@ import requests
 import json
 import pathlib
 import os
+from colorama import init, Fore, Back, Style
+import shutil
 
 API_URL = "https://rest.citybus.gr/api/v1/el/112/trips/stop/{stop}/day/{day}"
 LIVE_URL = "https://rest.citybus.gr/api/v1/el/112/stops/live/{stop}"
@@ -125,42 +127,69 @@ def fetch_stop_to_name_map():
         json.dump(stop_map, f, ensure_ascii=False, indent=2)
     return stop_map
 
-def print_bus_times(bus_times, linecode_map=None):
-    """Print bus times in a readable table, handling both scheduled and live formats. Optionally use linecode_map for names."""
+def print_bus_times(bus_times):
+    """
+    Print bus times in a table, handling both scheduled and live formats.
+    """
+    init(autoreset=True)
+    # Fixed widths for columns
+    col_names = ["Mins", "Time", "Line/Route"]
+    col_widths = [4, 5, 8, 24]  # Mins, Time, Line, Route
     if not bus_times:
-        print("No bus times found.")
+        print(Fore.RED + Back.BLACK + Style.BRIGHT + "No bus times found.")
         return
-    # Live format (dict)
     if isinstance(bus_times, dict) and 'vehicles' in bus_times:
         vehicles = bus_times['vehicles']
         if not vehicles:
-            print("No live vehicles found.")
+            print(Fore.RED + Back.BLACK + Style.BRIGHT + "No live vehicles found.")
             return
-        print(f"{'Mins':<5} {'Time':<6} {'Route':<30} {'Line':<25}")
-        print("-" * 50)
+        # Header
+        print(Fore.YELLOW + Style.BRIGHT + f"|{'Mins':<{col_widths[0]}}|{'Time':<{col_widths[1]}}|{'Line':<{col_widths[2]}} {'Route':<{col_widths[3]}}")
         now = datetime.datetime.now()
         for v in vehicles:
             mins = v.get('departureMins', 'N/A')
             route = v.get('routeName', 'N/A')
-            linecode = v.get('lineCode', 'N/A')
-            # linename = linecode_map.get(linecode, '') if linecode_map else ''
+            linecode = str(v.get('lineCode', ''))[:col_widths[2]]
             if isinstance(mins, int) or (isinstance(mins, str) and str(mins).isdigit()):
                 mins_int = int(mins)
                 time_str = (now + datetime.timedelta(minutes=mins_int)).strftime('%H:%M')
+                if mins_int <= 5:
+                    color = Fore.RED + Style.BRIGHT
+                elif mins_int <= 15:
+                    color = Fore.YELLOW + Style.BRIGHT
+                else:
+                    color = Fore.GREEN + Style.BRIGHT
             else:
                 time_str = 'N/A'
-            print(f"{mins:<5} {time_str:<6} {route:<30} {linecode:<25}")
+                color = Fore.WHITE + Style.BRIGHT
+            line_part = Style.BRIGHT + linecode.ljust(col_widths[2]) + Style.NORMAL
+            route_part = route[:col_widths[3]]
+            print(color + Back.BLACK + f"|{str(mins):>{col_widths[0]}}|{time_str:<{col_widths[1]}}|{line_part} {route_part:<{col_widths[3]}}")
         return
     # Scheduled format (list)
     stop = bus_times[0].get('stopName', 'N/A')
-    print(f"{stop:<25}")
-    print(f"{'Time':<6} {'Route':<30} {'Code':<25}")
-    print("-" * 45)
+    print(Fore.CYAN + Back.BLACK + Style.BRIGHT + stop)
+    col_names = ["Time", "Line/Route"]
+    col_widths = [5, 8, 24]
+    print(Fore.YELLOW + Back.BLUE + Style.BRIGHT + f"|{'Time':<{col_widths[0]}}|{'Line':<{col_widths[1]}} {'Route':<{col_widths[2]}}")
     for bus in bus_times:
         time = bus.get('tripTime', 'N/A')
         route = bus.get('routeName', 'N/A')
-        code = bus.get("lineCode", 'N/A')
-        print(f"{time:<6} {route:<30} {code:<25}")
+        linecode = str(bus.get('lineCode', ''))[:col_widths[1]]
+        line_part = Style.BRIGHT + linecode.ljust(col_widths[1]) + Style.NORMAL
+        route_part = route[:col_widths[2]]
+        print(Fore.GREEN + Back.BLACK + Style.BRIGHT + f"|{time:<{col_widths[0]}}|{line_part} {route_part:<{col_widths[2]}}")
+
+def print_stopname_map(stopname_map, query=None):
+    from colorama import Fore, Back, Style, init
+    init(autoreset=True)
+    col_names = ["Code", "Stop Name"]
+    col_widths = [6, 32]
+    print(Fore.YELLOW + Style.BRIGHT + f"|{col_names[0]:<{col_widths[0]}}|{col_names[1]:<{col_widths[1]}}")
+    for code, name in stopname_map.items():
+        if query and query.lower() not in name.lower():
+            continue
+        print(Fore.GREEN + Back.BLACK + Style.BRIGHT + f"|{code:<{col_widths[0]}}|{name[:col_widths[1]]:<{col_widths[1]}}")
 
 
 def main():
@@ -185,10 +214,9 @@ Notes:
         stopname_map = fetch_stop_to_name_map()
         if isinstance(args.names, str):
             query = args.names
-            matches = {k: v for k, v in stopname_map.items() if query.lower() in v.lower()}
-            print(json.dumps(matches, ensure_ascii=False, indent=2))
+            print_stopname_map(stopname_map, query=query)
         else:
-            print(json.dumps(stopname_map, ensure_ascii=False, indent=2))
+            print_stopname_map(stopname_map)
         return
 
     if args.live:
@@ -196,8 +224,6 @@ Notes:
     else:
         bus_times = fetch_bus_times(args.stop, args.day)
     print_bus_times(bus_times)
-
-# TODO: when user does --table get the names
 
 if __name__ == "__main__":
     # Set UTF-8 encoding for stdout on Windows
