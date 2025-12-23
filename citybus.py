@@ -12,6 +12,7 @@ import requests
 import json
 import pathlib
 import os
+import math
 from colorama import init, Fore, Back, Style
 import shutil
 
@@ -24,6 +25,7 @@ USER_DATA_DIR = os.path.join(os.path.dirname(__file__), 'user_data')
 CONFIG_FILE = os.path.join(USER_DATA_DIR, 'citybus_config.json')
 LINECODE_MAP_FILE = os.path.join(USER_DATA_DIR, 'linecode_map.json')
 BOOKMARKS_FILE = os.path.join(USER_DATA_DIR, 'bookmarks.json')
+STOPS_DATA_FILE = os.path.join(USER_DATA_DIR, 'stops_data.json')
 
 # Ensure user_data directory exists
 os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -129,6 +131,79 @@ def set_default_day(day):
     print(Fore.GREEN + f"Default day set to {day} ({day_names[day-1]})")
 
 
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees).
+    Returns distance in meters.
+    """
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    # Radius of earth in meters
+    r = 6371000
+    return c * r
+
+
+def get_user_location():
+    """
+    Returns (latitude, longitude) tuple or None if location cannot be determined.
+    """
+    # Try Termux API (Android) - most accurate for phones
+    try:
+        import subprocess
+        result = subprocess.run(['termux-location', '-p', 'gps'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            import json
+            location_data = json.loads(result.stdout)
+            if 'latitude' in location_data and 'longitude' in location_data:
+                lat = location_data['latitude']
+                lon = location_data['longitude']
+                print(f'Using GPS location from Termux API')
+                return (lat, lon)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def fetch_stops_data():
+    """
+    Fetch full stops data including GPS coordinates from the API.
+    Returns a list of stop dictionaries with code, name, latitude, longitude.
+    Caches the result in stops_data.json.
+    """
+    if os.path.exists(STOPS_DATA_FILE):
+        with open(STOPS_DATA_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    
+    # Fetch from the CityBus API
+    headers = _make_headers()
+    headers["Authorization"] = f"Bearer {get_bearer_token()}"
+    try:
+        print('Fetching stops data from API...')
+        response = requests.get(STOPS_URL, headers=headers)
+        response.raise_for_status()
+        stops = response.json()
+    except requests.RequestException as e:
+        print(f"Error fetching stops: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Save full data
+    with open(STOPS_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(stops, f, ensure_ascii=False, indent=2)
+    
+    return stops
+
+
 def fetch_stop_to_name_map():
     """
     Return a dict mapping stop code to stop name.
@@ -138,26 +213,19 @@ def fetch_stop_to_name_map():
     stop_name_path = os.path.join(USER_DATA_DIR, 'stop_name.json')
     if os.path.exists(stop_name_path):
         with open(stop_name_path, encoding='utf-8') as f:
-            print('Found local cache')
             return json.load(f)
-    # Fetch from the CityBus API
-    url = STOPS_URL
-    headers = _make_headers()
-    headers["Authorization"] = f"Bearer {get_bearer_token()}"
-    try:
-        print('Fetching from API')
-        response = requests.get(STOPS_URL, headers=headers)
-        response.raise_for_status()
-        stops = response.json()
-    except requests.RequestException as e:
-        print(f"Error fetching stops: {e}", file=sys.stderr)
-        sys.exit(1)
+    
+    # Fetch full data and extract names
+    stops = fetch_stops_data()
     stop_map = {str(stop['code']): stop['name'] for stop in stops}
+    
+    # Save name map for backward compatibility
     with open(stop_name_path, 'w', encoding='utf-8') as f:
         json.dump(stop_map, f, ensure_ascii=False, indent=2)
+    
     return stop_map
 
-def print_bus_times(bus_times):
+def print_bus_times(bus_times, stop_code=None):
     """
     Print bus times in a table, handling both scheduled and live formats.
     """
@@ -173,6 +241,11 @@ def print_bus_times(bus_times):
         if not vehicles:
             print(Fore.RED + Back.BLACK + Style.BRIGHT + "No live vehicles found.")
             return
+        # Display stop name for live times
+        if stop_code:
+            stopname_map = fetch_stop_to_name_map()
+            stop_name = stopname_map.get(str(stop_code), f"Stop {stop_code}")
+            print(Fore.CYAN + Back.BLACK + Style.BRIGHT + stop_name)
         # Header
         print(Fore.YELLOW + Style.BRIGHT + f"|{'Mins':<{col_widths[0]}}|{'Time':<{col_widths[1]}}|{'Line':<{col_widths[2]}} {'Route':<{col_widths[3]}}")
         now = datetime.datetime.now()
@@ -220,6 +293,70 @@ def print_stopname_map(stopname_map, query=None):
         if query and query.lower() not in name.lower():
             continue
         print(Fore.GREEN + Back.BLACK + Style.BRIGHT + f"|{code:<{col_widths[0]}}|{name[:col_widths[1]]:<{col_widths[1]}}")
+
+
+def print_nearby_stops(stops_with_distance):
+    """
+    Print stops with their distances in a formatted table.
+    stops_with_distance: list of (stop_dict, distance_in_meters) tuples
+    """
+    init(autoreset=True)
+    col_names = ["Code", "Stop Name", "Distance"]
+    col_widths = [6, 32, 10]
+    
+    print(Fore.CYAN + Style.BRIGHT + f"Found {len(stops_with_distance)} nearby stops:")
+    print(Fore.YELLOW + Style.BRIGHT + f"|{col_names[0]:<{col_widths[0]}}|{col_names[1]:<{col_widths[1]}}|{col_names[2]:<{col_widths[2]}}")
+    
+    for stop, distance in stops_with_distance:
+        code = str(stop['code'])
+        name = stop['name'][:col_widths[1]]
+        
+        # Format distance
+        if distance < 1000:
+            dist_str = f"{int(distance)}m"
+        else:
+            dist_str = f"{distance/1000:.2f}km"
+        
+        print(Fore.GREEN + Back.BLACK + Style.BRIGHT + f"|{code:<{col_widths[0]}}|{name:<{col_widths[1]}}|{dist_str:<{col_widths[2]}}")
+
+
+def find_nearby_stops(max_distance_meters, user_lat=None, user_lon=None):
+    """
+    Find stops within max_distance_meters of user's location.
+    Returns list of (stop, distance) tuples sorted by distance.
+    """
+    # Get user location
+    if user_lat is None or user_lon is None:
+        location = get_user_location()
+        if location is None:
+            print(Fore.RED + "Error: Could not determine your location.")
+            print("Please provide your GPS coordinates or ensure you have internet access.")
+            sys.exit(1)
+        user_lat, user_lon = location
+    
+    print(Fore.CYAN + f"Your location: {user_lat:.6f}, {user_lon:.6f}")
+    
+    # Fetch all stops data
+    stops = fetch_stops_data()
+    
+    # Calculate distances and filter
+    nearby_stops = []
+    for stop in stops:
+        try:
+            stop_lat = float(stop['latitude'])
+            stop_lon = float(stop['longitude'])
+            distance = haversine_distance(user_lat, user_lon, stop_lat, stop_lon)
+            
+            if distance <= max_distance_meters:
+                nearby_stops.append((stop, distance))
+        except (KeyError, ValueError, TypeError):
+            # Skip stops with invalid coordinates
+            continue
+    
+    # Sort by distance
+    nearby_stops.sort(key=lambda x: x[1])
+    
+    return nearby_stops
 
 
 def load_bookmarks():
@@ -318,6 +455,12 @@ Notes:
     # bookmark list (default when just 'bookmark' is used)
     bookmark_list_parser = bookmark_subparsers.add_parser('list', help='List all bookmarked stops')
     
+    # Near subcommand
+    near_parser = subparsers.add_parser('near', help='Find stops near your location')
+    near_parser.add_argument('distance', type=int, help='Maximum distance in meters')
+    near_parser.add_argument('--lat', type=float, help='Your latitude (optional, will auto-detect if not provided)')
+    near_parser.add_argument('--lon', type=float, help='Your longitude (optional, will auto-detect if not provided)')
+    
     # Main arguments (for default behavior)
     parser.add_argument('--stop', type=int, default=config['stop'], help=f'Stop ID (default: {config["stop"]})')
     parser.add_argument('--day', type=int, default=config['day'], help=f'Day of week (1=Monday, ..., 7=Sunday, default: {config["day"]})')
@@ -349,6 +492,21 @@ Notes:
             list_bookmarks()
         return
 
+    # Handle near command
+    if args.command == 'near':
+        # Validate that both lat and lon are provided together or neither
+        if (args.lat is None) != (args.lon is None):
+            print(Fore.RED + "Error: Both --lat and --lon must be provided together, or neither.")
+            sys.exit(1)
+        
+        nearby_stops = find_nearby_stops(args.distance, args.lat, args.lon)
+        
+        if not nearby_stops:
+            print(Fore.YELLOW + f"No stops found within {args.distance}m of your location.")
+        else:
+            print_nearby_stops(nearby_stops)
+        return
+
     # Handle --names flag
     if args.names:
         stopname_map = fetch_stop_to_name_map()
@@ -362,9 +520,10 @@ Notes:
     # Default behavior: show bus times
     if args.live:
         bus_times = fetch_bus_times_live(args.stop)
+        print_bus_times(bus_times, stop_code=args.stop)
     else:
         bus_times = fetch_bus_times(args.stop, args.day)
-    print_bus_times(bus_times)
+        print_bus_times(bus_times)
 
 if __name__ == "__main__":
     # Set UTF-8 encoding for stdout on Windows
