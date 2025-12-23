@@ -155,23 +155,24 @@ def get_user_location():
     """
     Returns (latitude, longitude) tuple or None if location cannot be determined.
     """
-    # Try Termux API (Android) - most accurate for phones
+    # Termux API (Android)
     try:
         import subprocess
         result = subprocess.run(['termux-location', '-p', 'gps'], 
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            import json
             location_data = json.loads(result.stdout)
             if 'latitude' in location_data and 'longitude' in location_data:
                 lat = location_data['latitude']
                 lon = location_data['longitude']
-                print(f'Using GPS location from Termux API')
+                print('Using GPS location from Termux API')
                 return (lat, lon)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, 
+            FileNotFoundError, PermissionError, ValueError, KeyError):
         pass
     except Exception:
         pass
+
     return None
 
 
