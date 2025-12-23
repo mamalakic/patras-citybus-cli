@@ -99,6 +99,36 @@ def load_config():
     return defaults
 
 
+def save_config(config):
+    """Save config to file."""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def set_default_stop(stop_code):
+    """Set the default stop in config."""
+    config = load_config()
+    config['stop'] = stop_code
+    save_config(config)
+    print(Fore.GREEN + f"Default stop set to {stop_code}")
+
+
+def set_default_day(day):
+    """Set the default day in config."""
+    if day < 1 or day > 7:
+        print(Fore.RED + "Error: Day must be between 1 (Monday) and 7 (Sunday)")
+        sys.exit(1)
+    config = load_config()
+    config['day'] = day
+    save_config(config)
+    day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    print(Fore.GREEN + f"Default day set to {day} ({day_names[day-1]})")
+
+
 def fetch_stop_to_name_map():
     """
     Return a dict mapping stop code to stop name.
@@ -221,7 +251,7 @@ def add_bookmark(stop_code):
         return
     bookmarks.append(stop_code)
     save_bookmarks(bookmarks)
-    print(Fore.GREEN + f"✓ Added stop {stop_code} to bookmarks.")
+    print(Fore.GREEN + f"Added stop {stop_code} to bookmarks.")
 
 
 def list_bookmarks():
@@ -261,6 +291,22 @@ Notes:
     # Create subparsers for commands
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
+    # Stop subcommand
+    stop_parser = subparsers.add_parser('stop', help='Manage default stop')
+    stop_subparsers = stop_parser.add_subparsers(dest='stop_action', help='Stop actions')
+    
+    # stop default
+    stop_default_parser = stop_subparsers.add_parser('default', help='Set default stop')
+    stop_default_parser.add_argument('stop_code', type=int, help='Stop code to set as default')
+    
+    # Day subcommand
+    day_parser = subparsers.add_parser('day', help='Manage default day')
+    day_subparsers = day_parser.add_subparsers(dest='day_action', help='Day actions')
+    
+    # day default
+    day_default_parser = day_subparsers.add_parser('default', help='Set default day')
+    day_default_parser.add_argument('day_number', type=int, help='Day number (1=Monday, ..., 7=Sunday)')
+    
     # Bookmark subcommand
     bookmark_parser = subparsers.add_parser('bookmark', help='Manage bookmarked stops')
     bookmark_subparsers = bookmark_parser.add_subparsers(dest='bookmark_action', help='Bookmark actions')
@@ -279,6 +325,18 @@ Notes:
     parser.add_argument('--names', nargs='?', const=True, default=False, help='Print the stop code-to-name map. Filter by substring if given')
     
     args = parser.parse_args()
+
+    # Handle stop command
+    if args.command == 'stop':
+        if args.stop_action == 'default':
+            set_default_stop(args.stop_code)
+        return
+    
+    # Handle day command
+    if args.command == 'day':
+        if args.day_action == 'default':
+            set_default_day(args.day_number)
+        return
 
     # Handle bookmark command
     if args.command == 'bookmark':
